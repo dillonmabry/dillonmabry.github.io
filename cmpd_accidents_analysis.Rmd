@@ -1,0 +1,419 @@
+---
+title: "Charlotte Mecklenburg Traffic Analysis"
+output: rmarkdown::github_document
+---
+
+This notebook highlights an analysis of Charlotte-Mecklenburg traffic patterns for November-December 2018 and contains over 3000 accidents of the sample dataset.
+
+Project goals include using ensemble learning to produce a model to highlight possible known accident areas for better public service response units.
+
+*Disclaimer "Accidents" included in these results include both traffic control/function issue type accidents and actual accident events.*
+
+## Dependencies:
+
+```{r warning = FALSE, message = FALSE}
+library(tidyverse)
+library(jsonlite)
+library(rgeos)
+library(plotly)
+library(lubridate)
+library(sp)
+library(geosphere)
+library(reshape2)
+library(randomForest)
+```
+
+## Load initial datasets
+
+```{r warning = FALSE, message = FALSE}
+
+accidents <- fromJSON("accidents.json", flatten = TRUE)
+
+census_income <- read_csv("census_household_income.csv")
+
+census_pop <- read_csv("census_population_groups.csv")
+
+traffic_signals <- read_csv("traffic_signals.csv")
+
+# TODO: Add data for azimuth via ARCGIS
+
+# TODO: Add data for speed limits per known roads via ARCGIS
+
+```
+
+## Data Cleansing
+
+Few steps we need to do before initial analysis:
+
+1. Clean/remove unneeded features
+
+2. Plot relationships of coordinates (traffic signals, census group coordinates, police divisions)
+
+3. Combine datasets into a single source (with all others)
+
+Since the census groupings are extremely similar for household income and population we can combine these coordinates and use them as the same for either dataset.
+
+```{r}
+
+census_income <- census_income %>% 
+  rename(
+    med_household_income = Median_Household_Income,
+    fam_poverty_rate = FamilyPovertyRate
+  ) %>%
+  select(
+    coordinates, 
+    med_household_income, 
+    fam_poverty_rate
+  )
+
+census_pop <- census_pop %>% 
+  rename(
+    population = Population,
+    pop_sq_mile = PopSqMi,
+    num_adolescents = Age0_17,
+    num_young_adults = Age18_34,
+    num_adults = Age35_64,
+    num_seniors = Age65andOver,
+    median_age = MedianAge
+  ) %>%
+  select(
+    coordinates,
+    population, 
+    pop_sq_mile, 
+    num_adolescents, 
+    num_young_adults, 
+    num_adults, 
+    num_seniors, 
+    median_age
+  )
+
+```
+
+Combine census keys (coordinates) since we are referring to the same areas, combine these datasets and their corresponding information
+
+We also have some corrupted data upon the join, so cleanup and replace zero values with mean of the specific column the data is in
+
+```{r}
+
+census_information <-
+  left_join(census_income, census_pop, by = "coordinates")
+
+census_information <- census_information %>%
+  mutate(med_household_income = ifelse(is.na(med_household_income), mean(med_household_income, na.rm=TRUE), med_household_income)) %>%
+  mutate(med_household_income = ifelse(med_household_income == 0, mean(med_household_income, na.rm=TRUE), med_household_income)) %>%
+  mutate(fam_poverty_rate = ifelse(ceiling(fam_poverty_rate) == 0, mean(fam_poverty_rate, na.rm=TRUE), fam_poverty_rate)) %>%
+  mutate(median_age = ifelse(ceiling(median_age) == 0, mean(median_age, na.rm=TRUE), median_age))
+
+# Add ID column for tagging to poly plots as foreign key
+census_information["new.census_key"] <- as.numeric(rownames(census_information))
+
+```
+
+Change data types to double for coordinate values
+
+```{r}
+
+accidents$latitude <- as.double(accidents$latitude)
+accidents$longitude <- as.double(accidents$longitude)
+
+```
+
+Combine census_information with the particular accident record in question
+
+Join based on the census track group the accident occurred in. If the accident coordinates are within the specific coordinate polygon then tag the accident to that particular census group
+
+```{r}
+final_polys <- c()
+for(row in seq(from=1, to=nrow(census_information))) {
+  # turn each row of coordinates into a list of doubles
+  coord_list <- as.list(strsplit(census_information$coordinates[row], ",")[[1]])
+  coord_num_list <- as.double(as.character(unlist(coord_list)))
+  # populate latitudes/longitudes as lists separately over every other item in coordlist
+  coord_lats <- c()
+  coord_lngs <- c()
+  for(i in seq(from=1, to=length(coord_num_list), by=2)) { 
+    coord_lats <- c(coord_lats,  coord_num_list[i] )
+  }
+  for(i in seq(from=0, to=length(coord_num_list), by=2)) { 
+    coord_lngs <- c(coord_lngs,  coord_num_list[i] )
+  }
+  # create polygon
+  poly1 <- Polygons(list(Polygon(cbind(coord_lats, coord_lngs))),'1')
+  # add as spatialpolygon
+  spatial_poly <- SpatialPolygons(list(poly1))
+  final_polys <- c(final_polys, spatial_poly)
+}
+
+```
+
+```{r}
+
+accidents["new.census_key"] <- NA
+
+for(i in seq(from=1, to=length(final_polys))) {
+  # Tag each accident coordinates over() if in spatial poly, then tag with that poly id
+  accident_coords <- data.frame(Longitude = accidents$longitude, Latitude = accidents$latitude,
+                                names = accidents$address)
+  coordinates(accident_coords) <- ~ Longitude + Latitude
+  proj4string(accident_coords) <- proj4string(final_polys[[i]])
+  tag <- over(accident_coords, final_polys[[i]])
+  tagged_indexes <- as.numeric(names(tag[!is.na(tag)]))
+  accidents$new.census_key[tagged_indexes] <- i
+}
+  
+```
+
+Join the plotted foreign key for census information
+
+```{r}
+
+accidents <- merge(accidents, census_information, by = "new.census_key")
+accidents$coordinates <- NULL # drop un-needed column from join with census_block
+accidents <- accidents[!duplicated(as.list(accidents))] # remove duplicate columns
+
+```
+
+Time based data: 
+
+Reshape and add month/day/hour as separate features for more drill-down data
+
+```{r}
+
+accidents$datetime_add <- as.POSIXct(accidents$datetime_add, format="%Y-%m-%dT%H:%M:%OS")
+accidents["new.month"] <- month(accidents$datetime_add)
+accidents["new.day"] <- day(accidents$datetime_add)
+accidents["new.hour"] <- hour(accidents$datetime_add)
+accidents["new.minute"] <- format(accidents$datetime_add, "%H:%M")
+
+```
+
+Road factors:
+
+Reshape and factorize distinct roads from addresses, substitute and trim characters to find levels
+Replace invalid/corrupt road names (&) with NA
+
+```{r}
+
+accidents["new.road"] <- factor(trimws(gsub('[0-9]+', '', accidents$address)))
+accidents[as.character(accidents$new.road) == '&', ]["new.road"] <- NA
+
+```
+
+Traffic Signal proximity
+
+```{r}
+# Get the min distance between comparing each accident to the known traffic signals in Mecklenburg area, the min will be the closest traffic signal to the accident in question
+final_dists <- c()
+for(i in seq(nrow(accidents))) {
+  dists <- distm(x = c(accidents$longitude[i], accidents$latitude[i]),
+               y = traffic_signals[, c("X", "Y")],
+               fun = distHaversine)
+  min_dist <- min(dists)
+  final_dists <- c(final_dists, min_dist)
+}
+accidents["new.signal_proximity"] <- final_dists
+```
+
+
+Final select and cleanup
+
+```{r}
+accidents <- accidents %>% 
+  rename(
+    id = `_id.$oid`,
+    new.area = `weatherInfo.name`
+  ) %>% select(
+    id,
+    event_no,
+    datetime_add,
+    division,
+    address,
+    event_type,
+    latitude,
+    longitude,
+    new.road,
+    new.signal_proximity,
+    new.month,
+    new.day,
+    new.hour,
+    new.minute,
+    new.area,
+    weatherInfo.weather,
+    weatherInfo.cod,
+    weatherInfo.visibility,
+    weatherInfo.main.temp,
+    weatherInfo.main.pressure,
+    weatherInfo.main.humidity,
+    weatherInfo.main.sea_level,
+    weatherInfo.main.grnd_level,
+    weatherInfo.wind.speed,
+    weatherInfo.wind.gust,
+    weatherInfo.clouds.all,
+    weatherInfo.sys.sunrise,
+    weatherInfo.sys.sunset,
+    weatherInfo.rain.3h,
+    weatherInfo.rain.1h,
+    weatherInfo.snow.1h,
+    med_household_income,
+    fam_poverty_rate,
+    population,
+    pop_sq_mile,
+    num_adolescents,
+    num_young_adults,
+    num_adults,
+    num_seniors,
+    median_age
+  )
+```
+
+## EDA
+
+Initial scattermap of the accidents with accident type as a visual to display intensity of problem areas
+
+```{r echo=FALSE}
+
+MAX_LAT <- 35.2
+MAX_LONG <- -80.85
+
+accidents_plot <- accidents %>%
+  plot_mapbox(lat = ~latitude, lon = ~longitude,
+              split = ~event_type, size=2,
+              mode = 'scattermapbox') %>%
+  layout(title = 'Charlotte-Mecklenburg Accidents by Type, Nov. - Dec. 2018',
+         font = list(color='white'),
+         plot_bgcolor = '#191A1A', paper_bgcolor = '#191A1A',
+         mapbox = list(style = 'dark', zoom = 10, center = list(lat = MAX_LAT, lon = MAX_LONG)),
+         legend = list(font = list(size = 8)))
+accidents_plot
+
+```
+
+```{r warning = FALSE, message = FALSE}
+
+dist_accidents <- accidents %>%
+  group_by(division, event_type) %>%
+  summarise(n = n()) %>%
+  arrange(n)
+
+road_accidents <- accidents %>%
+  group_by(new.road) %>%
+  summarise(n = n()) %>%
+  filter(!is.na(new.road)) %>%
+  top_n(5) %>%
+  arrange(n)
+  
+hour_accidents <- accidents %>%
+  group_by(new.hour) %>%
+  summarise(n = n()) %>%
+  arrange(n)
+
+hour_accidents_types <- accidents %>%
+  group_by(new.hour, event_type, division) %>%
+  summarise(n = n()) %>%
+  arrange(n)
+
+age_accidents <- accidents %>%
+  group_by(median_age, event_type) %>%
+  summarise(n = n()) %>%
+  filter(median_age > 15 && median_age < 50) %>%
+  arrange(n)
+
+```
+
+A few initial graphs detailing traffic patterns in the area and relationships between various features
+
+```{r}
+
+ggplot(dist_accidents, aes(x = reorder(division,n), y = n, fill = event_type)) +
+  geom_col() +
+  labs(title="Counts of accidents by division") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(road_accidents, aes(x = reorder(new.road, n), y = n)) +
+  geom_col() +
+  labs(title="Counts of accidents by road/intersection") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+ggplot(accidents, aes(x=median_age, fill = event_type)) +
+    geom_histogram(bins = 20)
+
+ggplot(accidents, aes(x = weatherInfo.rain.1h, y = weatherInfo.visibility, color = event_type)) +
+  geom_point() +
+  labs(title="Relationship between rainfall, visibility, and accidents")
+
+ggplot(accidents, aes(sample = weatherInfo.wind.speed)) +
+  stat_qq() +
+  facet_wrap( ~ event_type, nrow = 1) +
+  labs(title="Distribution of Accident Types and Wind Speed")
+
+ggplot(hour_accidents, aes(x = new.hour, y = n)) +
+  geom_line(color="red") +
+  scale_x_continuous(breaks = pretty(accidents$new.hour, n = 10)) +
+  geom_point() +
+  labs(title="Hourly traffic patterns grouped by counts for each day")
+
+ggplot(accidents, aes(x = new.hour, fill = event_type)) +
+  geom_histogram(bins = 10) +
+  labs(title="Hourly Traffic patterns grouped by counts for event type, division") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_x_continuous(breaks = pretty(accidents$new.hour, n = 10))
+
+ggplot(accidents, aes(x=med_household_income, fill = event_type)) + 
+    geom_histogram(bins = 10)
+
+ggplot(accidents, aes(x=population)) +
+    geom_histogram(bins = 10)
+
+ggplot(accidents, aes(x=new.signal_proximity)) +
+    geom_histogram(bins = 10)
+
+```
+
+Few points from the following graphics:
+
+* The top divisions for accidents include University City, Steele Creek, Central, and South by a substantial amount
+
+* The top road for accident counts include N Tryon St by far
+
+* Age census information does not necessarily represent an accurate age count, though the median age for most accidents include those in the 30-40 range by far
+
+* The obvious relationship between rainfall and visibility is apparent in the plots of accidents, only a slight increase of rainfall increase results in many more accidents with low visibility
+
+* There is no apparent relationship between wind speed and accident type, though a hypothesis would be increased wind would cause more TF (traffic function) type events
+
+* Based on time series the highest amount of accidents occur at 6:00 PM EST time on the dot.
+
+* Time series also indicates slight decrease troughs between lunch time and 5:00, this might represent people getting off of work at certain shifts (12, 3, 4)
+
+* Based on census income it shows there is a slight increase in counts of hit-and-runs in lower income bins, a hypothesis could be that these individuals are already struggling so the chance of escaping a potential negative cost could outweigh being stuck with more expenses
+
+* The vast majority of accidents occur within < 500-1000 meters from a traffic signal yet this makes sense considering Charlotte Meck. is an urban area with many signal areas even close to interstate highway ramps
+
+Correlation matrix for only numeric features, #TODO: transform categorical features to correct numeric representations
+
+```{r warning = FALSE, message = FALSE}
+
+accidents_matrix <- accidents %>%
+    select_if(is.numeric) %>%
+    cor(.)
+melted_acc <- melt(accidents_matrix)
+ggplot(data = melted_acc, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## Exploratory Modeling (To-Continue)
+
+For creating training data, we will pick a random date/time that is applicable during normal hours, if this does not contain an accident we will place this in our non-accident bin. We should ensure our proportions are correct in that we should have roughly less accidents than our non-accidents as to preserve realism in our predictions.
+
+Generate non-accident training data and test data
+
+Select a random accident record, alter the road, hour of the day, and the day of the year, if the record is not present we will add to our training set of non-accidents
+
+```{r}
+
+
+
+```
+
+
