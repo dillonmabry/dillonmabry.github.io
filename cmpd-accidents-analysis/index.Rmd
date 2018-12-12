@@ -9,6 +9,9 @@ Project goals include using ensemble learning to produce a model to highlight po
 
 *Disclaimer "Accidents" included in these results include both traffic control/function issue type accidents and actual accident events.*
 
+Data information:
+All data is obtained through open sources including Charlotte-Mecklenburg open data portal and NCDOT GIS data. Dates for datasets include as recent information as possible including 2013-2017 datasets for traffic volumes, census information, etc.
+
 ## Dependencies:
 
 ```{r warning = FALSE, message = FALSE}
@@ -29,15 +32,18 @@ library(randomForest)
 
 accidents <- fromJSON("accidents.json", flatten = TRUE)
 
+# TODO: add holdout validation set
+#holdout_set <- fromJSON("holdout.json", flatten = TRUE)
+
 census_income <- read_csv("census_household_income.csv")
 
 census_pop <- read_csv("census_population_groups.csv")
 
 traffic_signals <- read_csv("traffic_signals.csv")
 
-# TODO: Add data for azimuth via ARCGIS
+traffic_volumes <- read_csv("traffic_volumes.csv")
 
-# TODO: Add data for speed limits per known roads via ARCGIS
+state_roads <- read_csv("state_maintained_roads.csv")
 
 ```
 
@@ -47,11 +53,11 @@ Few steps we need to do before initial analysis:
 
 1. Clean/remove unneeded features
 
-2. Plot relationships of coordinates (traffic signals, census group coordinates, police divisions)
+2. Plot relationships of coordinates (traffic signals, census group coordinates)
 
 3. Combine datasets into a single source (with all others)
 
-Since the census groupings are extremely similar for household income and population we can combine these coordinates and use them as the same for either dataset.
+Since the census group coordinates are extremely similar for household income and population we can combine these coordinates and use them as the same for either dataset.
 
 ```{r}
 
@@ -187,15 +193,32 @@ accidents["new.minute"] <- format(accidents$datetime_add, "%H:%M")
 
 ```
 
-Road factors:
+Road names:
 
 Reshape and factorize distinct roads from addresses, substitute and trim characters to find levels
 Replace invalid/corrupt road names (&) with NA
 
+Road intersect names:
+Grab the actual address of the accident from the police response record
+
 ```{r}
 
-accidents["new.road"] <- factor(trimws(gsub('[0-9]+', '', accidents$address)))
-accidents[as.character(accidents$new.road) == '&', ]["new.road"] <- NA
+# Create variations of road names in order to provide insight for tagging volumes and other attributes
+accidents["new.road"] <- factor(gsub('[^[:alpha:]]+', '', accidents$address))
+accidents$new.road[accidents$new.road == ""] <- NA
+
+accidents.addresses <- accidents[accidents$address != "&", "address"]
+accidents["new.road_alpha"] <- factor(gsub('[^[:alnum:][:space:]]+', '', accidents.addresses))
+accidents[grep("^\\s*$", accidents$new.road_alpha), "address"] <- NA
+accidents[grep("^\\s*$", accidents$new.road_alpha), "new.road_alpha"] <- NA
+
+accidents["new.road_text"] <- gsub('[^[:alpha:][:space:]]+', '', accidents.addresses)
+
+# Grab first road in the combination of address and match the known traffic volume for the general area
+accidents["new.road_short"] <- NA
+first_roads <- sapply(strsplit(accidents$new.road_text, " "), function(x)x[which.max(nchar(x))])
+first_roads <- unlist(lapply(first_roads, function (x) ifelse(length (x) > 0, x, NA)))
+accidents["new.road_short"] <- as.factor(first_roads)
 
 ```
 
@@ -214,10 +237,103 @@ for(i in seq(nrow(accidents))) {
 accidents["new.signal_proximity"] <- final_dists
 ```
 
+Street Speed limits and assign road to a specific speed limit as key
+
+There is some data regarding speed limits for certain roads (primary, highways, etc.) however not all roads have speed limit data. To solve for this we will insert generic speed limits for common road names.
+
+If the road is a highway, we will check if it is an interstate and assign.
+If the road is not a highway or road, we will assign a generic 35 speed limit.
+
+This should account for most speed limits, and a slight difference should not have that great of an impact on our dataset.
+
+*An alternative option if interested: Use each accident coordinates in a way to match up with Google Maps Roads API to get the speed limit of the road in question, this requires creating a Google Cloud Platform account and all the details regarding it.*
+
+```{r warning = FALSE, message = FALSE}
+
+# Assign a generic speed limit to roads based on unique road names extracted
+# HWY will be assigned a state speed limit of 55, inner/outer freeways 70, all others 35
+extract_speed <- function(road) {
+  road <- as.character(road)
+  
+  if(length(grep("HY", road))) {
+    if(length(grep("I77", road))) {
+      return (70)
+    } else if(length(grep("I85", road))) {
+      return (70)
+    } else if(length(grep("I485", road))) {
+      return (70)
+    } else {
+      return (55)
+    }
+  } else if(length(grep("RD", road))) {
+      return (45)
+  } else {
+    return (35)
+  }
+}
+
+speeds <- NULL
+for (i in 1:nrow(accidents)) {
+  speeds <- c(speeds, extract_speed(accidents[i,"new.road"]))
+}
+accidents["new.speed_limit"] <- as.factor(speeds)
+
+```
+
+Factors for roads: Our current road feature needs some downsizing. We current have almost 2000 unique road name factors, a few options:
+
+1. Bin roads into state-owned vs. residential vs. highway/freeway type road features
+2. Bin roads into critical/high-population roads vs. all others
+3. Assign a "movement" rating factor to where the accident occurred, highly driven/populated roads will be assigned a higher score than others
+
+We will try approaches for #1 and #3
+
+```{r}
+
+# Tag a movement score to the road in question using Mecklenburg County traffic volumes
+mecklenburg_volumes <- traffic_volumes %>% 
+  filter(COUNTY == 'MECKLENBURG')
+
+# For each unique set of "routes" we will average the volumes to makeup a count for each route in general
+unique_routes <- unique(mecklenburg_volumes$ROUTE)
+mecklenburg_volumes["new.mean_vol"] <- NA
+for(i in seq(1:length(unique_routes))) {
+  route_data <- mecklenburg_volumes[mecklenburg_volumes$ROUTE == unique_routes[i],"2016"]
+  mean_vol <- lapply(route_data, mean, na.rm = TRUE)
+  mecklenburg_volumes[mecklenburg_volumes$ROUTE == unique_routes[i],"new.mean_vol"] <- mean_vol
+}
+
+# Tag accidents with traffic volumes, replace corrupt with average
+accidents["new.mean_vol"] <- NA
+for(i in seq(1:nrow(accidents))) {
+  mean_vol <- mecklenburg_volumes[grepl(as.character(accidents[i,"new.road_short"]), mecklenburg_volumes$ROUTE),"new.mean_vol"]
+  accidents[i,"new.mean_vol"] <- as.double(mean_vol$new.mean_vol[1])
+}
+accidents <- accidents %>%
+  mutate(new.mean_vol = ifelse(is.na(new.mean_vol), mean(new.mean_vol, na.rm=TRUE), new.mean_vol))
+
+accidents$new.mean_vol <- round(accidents$new.mean_vol, 0)
+
+```
+
 
 Final select and cleanup
 
 ```{r}
+
+# Replace NA numerics as 0 such as rainfall, snowfall, etc. for continuous variables
+accidents$weatherInfo.rain.1h[is.na(accidents$weatherInfo.rain.1h)] <- 0
+accidents$weatherInfo.snow.1h[is.na(accidents$weatherInfo.snow.1h)] <- 0
+accidents$weatherInfo.visibility[is.na(accidents$weatherInfo.visibility)] <- 0
+accidents$weatherInfo.main.sea_level[is.na(accidents$weatherInfo.main.sea_level)] <- 0
+accidents$weatherInfo.main.grnd_level[is.na(accidents$weatherInfo.main.grnd_level)] <- 0
+accidents$weatherInfo.wind.gust[is.na(accidents$weatherInfo.wind.gust)] <- 0
+accidents$weatherInfo.rain.3h[is.na(accidents$weatherInfo.rain.3h)] <- 0
+
+# Convert categoricals as factors
+accidents$division <- as.factor(accidents$division)
+accidents$weatherInfo.name <- as.factor(accidents$weatherInfo.name)
+
 accidents <- accidents %>% 
   rename(
     id = `_id.$oid`,
@@ -232,7 +348,9 @@ accidents <- accidents %>%
     latitude,
     longitude,
     new.road,
+    new.speed_limit,
     new.signal_proximity,
+    new.mean_vol,
     new.month,
     new.day,
     new.hour,
@@ -264,6 +382,7 @@ accidents <- accidents %>%
     num_seniors,
     median_age
   )
+
 ```
 
 ## EDA
@@ -271,7 +390,6 @@ accidents <- accidents %>%
 Initial scattermap of the accidents with accident type as a visual to display intensity of problem areas
 
 ```{r echo=FALSE}
-
 MAX_LAT <- 35.2
 MAX_LONG <- -80.85
 
@@ -367,6 +485,9 @@ ggplot(accidents, aes(x=population)) +
 ggplot(accidents, aes(x=new.signal_proximity)) +
     geom_histogram(bins = 10)
 
+ggplot(accidents, aes(x=new.mean_vol)) +
+    geom_histogram(bins = 10)
+
 ```
 
 Few points from the following graphics:
@@ -402,6 +523,7 @@ ggplot(data = melted_acc, aes(x=Var1, y=Var2, fill=value)) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
+
 ## Exploratory Modeling (To-Continue)
 
 For creating training data, we will pick a random date/time that is applicable during normal hours, if this does not contain an accident we will place this in our non-accident bin. We should ensure our proportions are correct in that we should have roughly less accidents than our non-accidents as to preserve realism in our predictions.
@@ -412,8 +534,108 @@ Select a random accident record, alter the road, hour of the day, and the day of
 
 ```{r}
 
+START_DATE <- min(accidents$datetime_add)
+END_DATE <- max(accidents$datetime_add)
+TRAIN_SIZE = 10000
+ITERATIONS = 2
+
+# generate random non-accidents by altering hour, day, month, and road, if no accident add to our train
+non_accidents <- NULL
+for(iteration in seq(1:ITERATIONS)) {
+  for(i in seq(1:nrow(accidents))) {
+    recc <- accidents[i,]
+    test_date <- as.POSIXct(sample(as.numeric(START_DATE): as.numeric(END_DATE), 1, replace = T), origin = '1970-01-01')
+    t_month <- month(test_date)
+    t_day <- day(test_date)
+    t_hour <- hour(test_date)
+    t_minute <- format(test_date, "%H:%M")
+    t_road <- sample(accidents$new.road, 1)
+    acc_rec <- accidents[(accidents$new.hour == t_hour) && 
+                           (accidents$new.day == t_day) && 
+                           (accidents$new.month == t_month) && 
+                           (accidents$new.road == t_road), ]
+    
+    if(nrow(acc_rec) != 0) {
+      print("accident found")
+      next;
+    } else {
+      # Add to train set from modified record
+      recc$new.hour <- t_hour
+      recc$new.day <- t_day
+      recc$new.month <- t_month
+      recc$new.road <- t_road
+      recc$new.minute <- t_minute
+      recc$datetime_add <- test_date
+      non_accidents <- rbind(recc, non_accidents)
+    }
+  }
+}
+
+```
+
+Sanity check to ensure non_accidents indeed did not occur, then combine non_accidents with accidents to produce our training set
+
+```{r}
+
+train_set_check <- accidents[accidents$datetime_add == non_accidents$datetime_add,]
+nrow(train_set_check)
+
+accidents["is_accident"] <- 1
+non_accidents["is_accident"] <- 0
+
+train <- rbind(accidents, non_accidents)
 
 
 ```
 
+```{r}
+
+rf.train.1 <- train[1:nrow(train), c(
+  "new.hour",
+  "new.day",
+  "new.month",
+  "division",
+  "new.signal_proximity",
+  "new.area",
+  "new.speed_limit",
+  "new.mean_vol",
+  "weatherInfo.visibility",
+  "weatherInfo.main.temp",
+  "weatherInfo.wind.speed",
+  "weatherInfo.clouds.all",
+  "weatherInfo.rain.1h",
+  "weatherInfo.snow.1h",
+  "pop_sq_mile",
+  "median_age"
+  )
+]
+
+rf.label <- as.factor(train$is_accident)
+
+set.seed(1234)
+rf.1 <- randomForest(x = rf.train.1, y = rf.label, importance = TRUE, ntree = 1000)
+
+```
+
+```{r}
+
+plot(varImpPlot(rf.1))
+
+```
+
+Based on observations of an initial train model, hour/day is the single biggest predictor of all features
+
+As we saw previously larger concentrations of accidents due occur with bad weather (temp, clouds, rain)
+
+An odd observation is the initial model shows little importance for speed limit or signal proximity compared to other values. This is most likely due to the fact that many roads in our dataset have similar speed limits as well as the fact that most accidents occur within a range of a traffic signal anyway. We might have to do some scaling with these features.
+
+*Based on just the following data gathered so far my suspicion is this model is highly overfitted to hour/day features and we should probably generate and/or gather better non-accident data to supplement our training set.*
+
+Some items to update:
+
+1. Bin roads into correct factors (right now we are not taking into account specific road involved in the accident this will be a huge feature for us, currently we cannot use our 500+ unique shortened road names)
+
+2. Add better supplemental training data for non-accidents, change various other features and include bigger training set
+
+3. Combine/understand features or drop unneeded features
 
