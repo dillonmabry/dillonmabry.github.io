@@ -1,6 +1,6 @@
 ---
 title: "Charlotte Mecklenburg Traffic Analysis"
-output: rmarkdown::github_document
+output: html_document
 ---
 
 This notebook highlights an analysis of Charlotte-Mecklenburg traffic patterns for November-December 2018 and contains over 3000 accidents of the sample dataset.
@@ -390,6 +390,10 @@ accidents <- accidents %>%
 Initial scattermap of the accidents with accident type as a visual to display intensity of problem areas
 
 ```{r echo=FALSE}
+Sys.setenv("plotly_username"="rapid.dev.solutions")
+Sys.setenv("plotly_api_key"="YYrxMrI7Jfe5zPtXAAM5")
+Sys.setenv('MAPBOX_TOKEN' = 'pk.eyJ1IjoicmFwaWRkZXZzb2x1dGlvbnMiLCJhIjoiY2pwN25id282MGc5bzNwcDVncDY1azZqZSJ9.Ecgf61L2kWNN2sO2FkPIiA')
+
 MAX_LAT <- 35.2
 MAX_LONG <- -80.85
 
