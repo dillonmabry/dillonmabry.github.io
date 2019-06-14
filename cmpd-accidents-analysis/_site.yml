@@ -1,6 +1,0 @@
-name: "My Notebooks"
-navbar:
-  title: "My Notebooks"
-  left:
-    - text: "Home"
-      href: index.html
