@@ -361,8 +361,8 @@ We can see that the land/acres associated with a property has an enormous value 
 house.data.rfdata <- house.data.new %>% dplyr::select(-Block, -OwnerID, -PrimaryOwner, -TaxPayerCity, -Zip, -PhyStreetName, -MarketAreaCode)
 
 set.seed(2018)
-# Ignore TMV (prediction) and DateSold (NAs, irrelevant)
-quick_RF <- randomForest(x=house.data.rfdata[1:5000, c(-14, -16)], y=house.data.rfdata$TotalMarketValue[1:5000], ntree=100, importance=TRUE)
+# Ignore TMV (prediction) and factor categories
+quick_RF <- randomForest(x=house.data.rfdata[1:5000, c(-5, -6, -14, -16, -19)], y=house.data.rfdata$TotalMarketValue[1:5000], ntree=100, importance=TRUE)
 imp_RF <- importance(quick_RF)
 imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
 imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
