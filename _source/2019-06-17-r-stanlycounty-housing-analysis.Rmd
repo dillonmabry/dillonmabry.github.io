@@ -60,10 +60,7 @@ Sys.setenv('MAPBOX_TOKEN' = 'pk.eyJ1IjoicmFwaWRkZXZzb2x1dGlvbnMiLCJhIjoiY2pwN25i
 ```
 
 ```{r}
-# Convert xlsx to
-download.file(url = "ftp://ftp.stanlygis.net/gisdata/StanlyCoTaxData/2018/Stanly%20County%20Tax%20Data.xlsx", destfile = "stanly_house_data.xlsx", mode="wb")
-df <- read_excel("stanly_house_data.xlsx")
-write.csv(df,"stanly_house_data.csv",row.names=FALSE)
+download.file(url = "https://docs.google.com/uc?export=download&id=1Ujnu-4M2p6dyQoPmb2K9Az9kLnV19NlQ", destfile = "stanly_house_data.csv", mode="wb")
 house.data <- read.csv('stanly_house_data.csv', header=TRUE)
 ```
 
