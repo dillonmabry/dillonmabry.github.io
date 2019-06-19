@@ -35,6 +35,7 @@ install.packages('hexbin')
 install.packages('randomForest')
 install.packages('plotly')
 install.packages('usdm')
+install.packages("evaluate")
 ```
 
 Libraries:
