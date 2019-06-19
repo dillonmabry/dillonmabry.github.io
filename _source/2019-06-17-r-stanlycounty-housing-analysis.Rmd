@@ -23,7 +23,6 @@ The following outliers will be removed:
 knitr::opts_chunk$set(fig.path="https://dillonmabry.github.io//images/stanly-county-housing-data")
 ```
 
-Packages:
 ```{r warning=FALSE, message=FALSE, include=FALSE}
 install.packages("readxl")
 install.packages('ggplot2')
@@ -51,6 +50,7 @@ library(hexbin)
 library(randomForest)
 library(plotly)
 library(usdm)
+library(evaluate)
 ```
 
 ```{r set-options, echo=FALSE, cache=FALSE}
@@ -414,7 +414,7 @@ write.csv(highestValuedProperties, "stanly_county_housing_dist548.csv")
 
 ```{r, fig.width=12}
 download.file(url = "https://docs.google.com/uc?export=download&id=1QGN6cZmRnYokMWX-7ItR2J-aFiQytaD7", destfile = "stanly_house_data_sample_wcoords.csv", mode="wb")
-house.data.highValued <- read.csv("stanly_house_data_dist548_with_coords.csv.csv")
+house.data.highValued <- read.csv("stanly_house_data_dist548_with_coords.csv")
 MAX_LAT <- 35.25
 MAX_LONG <- -80.10
 
