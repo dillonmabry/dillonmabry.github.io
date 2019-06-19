@@ -415,8 +415,8 @@ write.csv(highestValuedProperties, "stanly_county_housing_dist548.csv")
 ```
 
 ```{r, fig.width=12}
-download.file(url = "https://docs.google.com/uc?export=download&id=1QGN6cZmRnYokMWX-7ItR2J-aFiQytaD7", destfile = "stanly_house_data_dist548_with_coords.csv", mode="wb")
-house.data.highValued <- read.csv("stanly_house_data_dist548_with_coords.csv")
+download.file(url = "https://docs.google.com/uc?export=download&id=1QGN6cZmRnYokMWX-7ItR2J-aFiQytaD7", destfile = "dist548_wcoords.csv", mode="wb")
+house.data.highValued <- read.csv("dist548_wcoords.csv")
 MAX_LAT <- 35.25
 MAX_LONG <- -80.10
 
@@ -437,8 +437,8 @@ Each address that did not have NA/missing values for the property address can be
 
 ```{r}
 # Will read the first 1900 records with ip locations encoded using Geocodio
-download.file(url = "https://docs.google.com/uc?export=download&id=1oFBXyLe4pKytDgYFPSbG3J1v9MtqW5mu", destfile = "stanly_house_data_sample_wcoords.csv", mode="wb")
-house.data.ips <- read.csv('stanly_house_data_sample_wcoords.csv', header=TRUE)
+download.file(url = "https://docs.google.com/uc?export=download&id=1oFBXyLe4pKytDgYFPSbG3J1v9MtqW5mu", destfile = "sample_data_wcoords.csv", mode="wb")
+house.data.ips <- read.csv('sample_data_wcoords.csv', header=TRUE)
 house.data.ips$QualityGradeCode.new <- sapply(house.data.ips$QualityGradeCode, simplify_quality_code)
 ```
 
