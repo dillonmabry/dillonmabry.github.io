@@ -35,6 +35,7 @@ install.packages('randomForest')
 install.packages('plotly')
 install.packages('usdm')
 install.packages("evaluate")
+install.packages("webshot")
 ```
 
 Libraries:
@@ -51,6 +52,7 @@ library(randomForest)
 library(plotly)
 library(usdm)
 library(evaluate)
+library(webshot)
 ```
 
 ```{r set-options, echo=FALSE, cache=FALSE}
