@@ -24,7 +24,6 @@ knitr::opts_chunk$set(fig.path="https://dillonmabry.github.io//images/stanly-cou
 ```
 
 ```{r warning=FALSE, message=FALSE, include=FALSE}
-install.packages("readxl")
 install.packages('ggplot2')
 install.packages('corrplot')
 install.packages('scales')
@@ -32,16 +31,12 @@ install.packages('dplyr')
 install.packages('tidyr')
 install.packages('hexbin')
 install.packages('randomForest')
-install.packages('plotly')
 install.packages('usdm')
-install.packages("evaluate")
-install.packages("webshot")
+install.packages("car")
 ```
 
-Libraries:
 ```{r warning=FALSE, message=FALSE}
 # Libraries
-library(readxl)
 library(ggplot2)
 library(corrplot)
 library(scales)
@@ -49,17 +44,8 @@ library(dplyr)
 library(tidyr)
 library(hexbin)
 library(randomForest)
-library(plotly)
 library(usdm)
-library(evaluate)
-library(webshot)
-```
-
-```{r set-options, echo=FALSE, cache=FALSE}
-# Mapbox API and options
-Sys.setenv("plotly_username"="rapid.dev.solutions")
-Sys.setenv("plotly_api_key"="YYrxMrI7Jfe5zPtXAAM5")
-Sys.setenv('MAPBOX_TOKEN' = 'pk.eyJ1IjoicmFwaWRkZXZzb2x1dGlvbnMiLCJhIjoiY2pwN25id282MGc5bzNwcDVncDY1azZqZSJ9.Ecgf61L2kWNN2sO2FkPIiA')
+library(car)
 ```
 
 ```{r}
@@ -291,7 +277,6 @@ plot(anova, 1)
 
 ```{r warning=FALSE}
 # Levene test to validate our assumptions of p-value http://www.sthda.com/english/wiki/one-way-anova-test-in-r
-library(car)
 leveneTest(TotalMarketValue ~ Decade, data = marketValueByDecade)
 ```
 
@@ -364,7 +349,7 @@ We can see that the land/acres associated with a property has an enormous value 
 house.data.rfdata <- house.data.new %>% dplyr::select(-Block, -OwnerID, -PrimaryOwner, -TaxPayerCity, -Zip, -PhyStreetName, -MarketAreaCode)
 
 set.seed(2018)
-# Ignore TMV (prediction) and factor categories
+# Ignore TMV (prediction) and DateSold (NAs, irrelevant)
 quick_RF <- randomForest(x=house.data.rfdata[1:5000, c(-5, -6, -14, -16, -19)], y=house.data.rfdata$TotalMarketValue[1:5000], ntree=100, importance=TRUE)
 imp_RF <- importance(quick_RF)
 imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
@@ -401,66 +386,27 @@ In previous years many homes were built for long standing employees working unde
 median(house.data.new[house.data.new$DistrictCode == "520", "TotalMarketValue"])
 ```
 
-### Exploring property quality/values and their locations via mapping
+We can also see that the following properties are waterfront based on the addresses listed in this district.
 
-Let us explore the highest valued distict, which is abnormally high for the entire county.
-
-Let us get the coordinates via Python since we do not have lat/lng supplied for us.
-
-We can see that this area is "EdgeWater Lake Tillery" which contains newly built properties specifically for waterfront real estate. This explains the main outliers in out dataset from these higher valued properties.
+District 548 contains high valued properties via Lake Tillery managed under a real estate company known as Edgewater. This makes our dataset highly skewed with these properties. From this point on we will remove these properties from our dataset to be more representative of our actual data.
 
 ```{r}
-highestValuedProperties <- house.data[house.data$DistrictCode == "548",]
-write.csv(highestValuedProperties, "stanly_county_housing_dist548.csv")
+median(house.data.new[house.data.new$DistrictCode == "548", "TotalMarketValue"])
 ```
-
-```{r, fig.width=12}
-download.file(url = "https://docs.google.com/uc?export=download&id=1QGN6cZmRnYokMWX-7ItR2J-aFiQytaD7", destfile = "dist548_wcoords.csv", mode="wb")
-house.data.highValued <- read.csv("dist548_wcoords.csv")
-MAX_LAT <- 35.25
-MAX_LONG <- -80.10
-
-propertiesPlot <- house.data.highValued %>%
- plot_mapbox(lat = ~lat, lon = ~lng, size=2,
-             mode = 'scattermapbox') %>%
- layout(title = 'Highest Valued Outlier Properties (Waterfront)',
-        font = list(color='black'),
-        mapbox = list(style = 'light', zoom = 11, center = list(lat = MAX_LAT, lon = MAX_LONG)),
-        legend = list(font = list(size = 8)))
-
- propertiesPlot
-```
-
-The following data was merged using Geocodio API and latitude/longitude coordinates of each address retrieved/added to the dataset.
-
-Each address that did not have NA/missing values for the property address can be viewed along with the respective quality grade (A, B, C, D, E)
 
 ```{r}
-# Will read the first 1900 records with ip locations encoded using Geocodio
-download.file(url = "https://docs.google.com/uc?export=download&id=1oFBXyLe4pKytDgYFPSbG3J1v9MtqW5mu", destfile = "sample_data_wcoords.csv", mode="wb")
-house.data.ips <- read.csv('sample_data_wcoords.csv', header=TRUE)
-house.data.ips$QualityGradeCode.new <- sapply(house.data.ips$QualityGradeCode, simplify_quality_code)
+# Remove outliers
+house.data.new <- house.data.new %>% filter(DistrictCode != 548)
+
+# Rexamined Medians post-filter
+ggplot(house.data.new[!is.na(house.data.new$TotalMarketValue),], aes(x=DistrictCode, y=TotalMarketValue)) + geom_bar(stat='summary', fun.y = "median", fill='blue') +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_y_continuous(breaks= seq(0, 800000, by=50000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) +
+        geom_hline(yintercept=median(house.data.new$TotalMarketValue), linetype="dashed", color = "red")
 ```
 
-As we can see most of the higher valued properties are either in mid-town Albemarle (the county capital), Locust, or on Lake Tillery which contains many of the waterfront properties.
-
-The Badin and Norwood areas have zero properties with a quality grade rating of at least B.
-
-```{r, fig.width=12}
- MAX_LAT <- 35.33
- MAX_LONG <- -80.22
-
- propertiesPlot <- house.data.ips %>%
-   filter(QualityGradeCode.new == "A" | QualityGradeCode.new == "B") %>%
-   plot_mapbox(lat = ~lat, lon = ~lng,
-               split = ~QualityGradeCode.new, size=2,
-               mode = 'scattermapbox') %>%
-   layout(title = 'Stanly County Highest Valued Properties 2019 (Sample Only)',
-          font = list(color='black'),
-          mapbox = list(style = 'light', zoom = 9, center = list(lat = MAX_LAT, lon = MAX_LONG)),
-          legend = list(font = list(size = 8)))
- propertiesPlot
-```
+### Exploring "Value" Properties
 
 What are homes with the highest quality codes and critical features with the lowest price? Aka Best valued homes assessed via the County.
 
@@ -471,7 +417,6 @@ The sum of each column vector for the specified features $X_{ij}$ scaled as a po
 $\frac{(\sum_{j=1}^n Scale(X_{ij})}{Scale(V)} $
 
 ```{r}
-
 qualityProperties <- house.data.new %>%
    filter(QualityGradeCode.new == "A" | QualityGradeCode.new == "B" | QualityGradeCode.new == "C")
 
@@ -490,38 +435,8 @@ qualityProperties <- transform(qualityProperties, TotalPropertyValueScore = qual
 
 qualityProperties$TotalPropertyValueScore <- scale(qualityProperties$TotalPropertyValueScore)
 
-# Top 5 "value" based properties, higher score indicates more features for the market price gained
-head(qualityProperties[order(-qualityProperties$TotalPropertyValueScore ),], 5)
-
-```
-
-## Creating a Regression Model
-
-### Cleanup
-
-Check for multicollinearity for numeric features
-
-We already know we have multiple features that represent the same value, we should remove these before fitting a model to prevent uncertainty
-
-We will pick "one or the other" features which are correlated with each other
-
-```{r}
-vif(all_numVar)
-```
-
-```{r}
-house.data.new.lr <- house.data.new %>% filter(-ListedAcres, -LandMarketValue, -LandAssessedValue, -TotalAssessedValue)
-```
-
-Handle skewness and normalize data
-
-```{r}
-
-```
-
-### Initial model and tuning
-
-```{r}
+# Top 10 "value" based properties, higher score indicates more features for the market price gained
+head(qualityProperties[order(-qualityProperties$TotalPropertyValueScore ),], 10)
 
 ```
 
