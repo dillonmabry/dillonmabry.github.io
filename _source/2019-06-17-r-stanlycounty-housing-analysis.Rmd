@@ -1,0 +1,442 @@
+---
+layout: post
+title:  "Stanly County Housing Data Analysis"
+date:   2019-06-17 23:00:40 +0100
+categories: r jekyll
+---
+
+## Summary:
+This notebook is to demo general analysis of 2018 Stanly County Tax Property Dataset.
+The dataset contains almost 40k observations of all properties valued in Stanly County, NC.
+
+The filtered dataset for analysis will contain around ~24k observations which will only contain residential dwellings/homes and not apartments, commercial, vacant, or industrial properties.
+
+### Note on outliers:
+The following outliers will be removed:
+- Records with critical features missing (YearBuilt, Mapping/Location information)
+- Records that are not residential dwellings (Commericial, Industrial, etc.)
+- Vacant Properties
+- Properties with values over 2 million USD
+
+* For setting jekyll compatibility for images
+```{r warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(fig.path="https://dillonmabry.github.io//images/stanly-county-housing-data")
+```
+
+```{r warning=FALSE, message=FALSE, include=FALSE}
+install.packages('ggplot2')
+install.packages('corrplot')
+install.packages('scales')
+install.packages('dplyr')
+install.packages('tidyr')
+install.packages('hexbin')
+install.packages('randomForest')
+install.packages('usdm')
+install.packages("car")
+```
+
+```{r warning=FALSE, message=FALSE}
+# Libraries
+library(ggplot2)
+library(corrplot)
+library(scales)
+library(dplyr)
+library(tidyr)
+library(hexbin)
+library(randomForest)
+library(usdm)
+library(car)
+```
+
+```{r}
+download.file(url = "https://docs.google.com/uc?export=download&id=1Ujnu-4M2p6dyQoPmb2K9Az9kLnV19NlQ", destfile = "stanly_house_data.csv", mode="wb")
+house.data <- read.csv('stanly_house_data.csv', header=TRUE)
+```
+
+## Data validations, cleanup:
+Only get features we know will be useful.
+
+```{r}
+house.data.new <-
+  house.data %>%
+  dplyr::select(YearBuilt,
+         Sqft = FinishedArea,
+         Stories,
+         Submap,
+         Block,
+         CityCode,
+         OwnerID,
+         PrimaryOwner = Name1,
+         TaxPayerCity,
+         Zip,
+         PhyStreetName,
+         PhyStreetType,
+         ListedAcres = DeedAcres,
+         ActualAcres = MapAcres,
+         DistrictCode,
+         TownshipCode,
+         PropertyCode = DescCode1, # Property type
+         MarketAreaCode = NBHDCode, # Market area
+         LandMarketValue = LandFMVCurrent,
+         LandAssessedValue = LandASVCurrent,
+         TotalMarketValue = TotalFMVCurrent,
+         TotalAssessedValue = TotalASVCurrent,
+         DateSold,
+         SaleAmount,
+         TotalTaxOwed,
+         IsMultiSegments = MultiLandSegments,
+         QualityGradeCode,
+         HVACCompCode,
+         HVACUnits,
+         Baths,
+         Bedrooms,
+         PctComplete,
+         IsFirePlace = FirePlace,
+         IsBasement = Basement,
+         IsGarageAttached = AttachedGarage)
+
+```
+
+Explore feature types and missing values
+
+```{r}
+sapply(house.data.new, class)
+```
+```{r}
+colSums(is.na(house.data.new))
+```
+
+```{r}
+colSums(house.data.new == "")
+```
+
+### Cleanup data:
+- Replace missing values
+- Auto generate any data
+- Filter out bad instances
+- Reclassify feature types
+
+```{r}
+# Filter outliers
+# NA and Empty data
+house.data.new <- house.data.new %>% drop_na(YearBuilt, Submap, Block)
+house.data.new <- house.data.new %>% filter(!(PropertyCode == ""))
+# Filter out Apartments, Commercial, Exempt, Industrial, and Vacant
+nonWantedTypes <- c("A", "C", "E","I","V")
+house.data.new <- house.data.new %>% filter(!as.character(PropertyCode) %in% nonWantedTypes)
+# Filter out properties > 2e6 value
+house.data.new <- house.data.new %>% filter(TotalMarketValue <= 2e6)
+# Substitution
+house.data.new <- within(house.data.new, 
+                         HVACCompCode <- ifelse(!is.na(HVACCompCode), HVACCompCode, 9999)
+                         )
+# Dates/Times https://www.statmethods.net/input/dates.html
+house.data.new$YearBuilt.new <- as.Date(paste(house.data.new$YearBuilt, 1, 1, sep = "-"))
+house.data.new$DateSold <- as.Date(house.data.new$DateSold, format = "%d-%b-%y")
+
+
+# Factors
+house.data.new <- within(house.data.new, 
+                         IsMultiSegments <- ifelse(IsMultiSegments == "", "N", "Y")
+                         )
+house.data.new$IsMultiSegments <- factor(house.data.new$IsMultiSegments, levels=c("N", "Y"))
+house.data.new$Submap <- factor(house.data.new$Submap)
+house.data.new$Block <- factor(house.data.new$Block)
+house.data.new$DistrictCode <- factor(house.data.new$DistrictCode)
+house.data.new$TownshipCode <- factor(house.data.new$TownshipCode)
+house.data.new$MarketAreaCode <- factor(house.data.new$MarketAreaCode)
+house.data.new$HVACCompCode <- factor(house.data.new$HVACCompCode)
+house.data.new$OwnerID <- factor(house.data.new$OwnerID)
+
+# Simplify Property Quality Codes/Factors
+simplify_quality_code <- function(code) {
+  qc <- as.character(code)
+  if(grepl("A", qc)) {
+    return ("A")
+  } else if (grepl("B", qc)) {
+    return ("B")
+  } else if (grepl("C", qc)) {
+    return ("C")
+  } else if (grepl("D", qc)) {
+    return ("D")
+  } else {
+    return ("E")
+  }
+}
+house.data.new$QualityGradeCode.new <- sapply(house.data.new$QualityGradeCode, simplify_quality_code)
+house.data.new$QualityGradeCode.new <- as.factor(house.data.new$QualityGradeCode.new)
+```
+
+### Initial View post-filtration:
+
+```{r}
+dim(house.data.new)
+```
+
+```{r}
+summary(house.data.new)
+```
+
+## Exploratory Analysis:
+
+What are the majority of houses valued at based on market?  (Filtered up to TMV < 1e6)
+
+The vast majority are valued under $250,000 based on market value in Stanly County from tax assessors
+
+```{r, fig.width=12}
+ggplot(house.data.new, aes(x=TotalMarketValue)) +
+    geom_histogram(binwidth = 10000, fill = "blue") +
+    scale_x_continuous(breaks= seq(0, 800000, by=100000), labels = comma) +
+    labs(x = "Price $",title = "Price Distribution")
+```
+
+What are the general distributions of specific attributes (Beds, Baths, Acres)?  (Filtered up to Beds/Baths < 10)
+
+```{r} 
+ggplot(house.data.new, aes(x=Bedrooms)) +
+    geom_histogram(bins = 10, binwidth = 1, fill = "blue") +
+    scale_x_continuous(limits = c(0,10)) +
+    labs(x = "Beds",
+       title = "Beds Distribution")
+```
+```{r}
+ggplot(house.data.new, aes(x=Baths)) +
+    geom_histogram(bins = 10, binwidth = 1, fill = "blue") +
+    scale_x_continuous(limits = c(0,10)) +
+    labs(x = "Baths",
+       title = "Baths Distribution")
+```
+
+Which cities have the higher quality properties?
+
+Based on general distributions we can see that areas such as Norwood, Stanfield, New London, and Richfield cover more C, D, and E properties than other areas with even higher populations
+
+For example, Albemarle, the seat of the county has a much higher population, so it is expected to fill the majority of the property distributions
+
+Locust seems to have higher valued properties in general than most cities on the CityCode in the B and C quality category
+
+```{r warning=FALSE}
+ggplot(house.data.new, aes(x=QualityGradeCode.new, fill = CityCode)) +
+    geom_histogram(bins = 10, binwidth = 1, stat = "count") +
+    labs(x = "Quality",
+       title = "Property Grade Distribution")
+```
+
+Which areas generally have the lower quality based properties?
+
+We can see that Albemarle has an overwhelming distribution of D grade properties (over 1000+ in our dataset of ~25k records)
+
+We can also see that Norwood has a large portion of lower grade properties, though has a smaller population in general
+
+Albemarle NC population: ~16k (2017)
+Norwood NC population: ~2.5k (2017)
+
+```{r warning=FALSE}
+lowQualityCodes <- c("D","E")
+lowQualityProperties <- house.data.new %>% filter(as.character(QualityGradeCode) %in% lowQualityCodes)
+ggplot(lowQualityProperties, aes(x=QualityGradeCode.new, fill = CityCode)) +
+    geom_histogram(bins = 10, binwidth = 1, stat = "count") +
+    labs(x = "Quality",
+       title = "Property Grade Distribution")
+```
+
+Which cities generally have the highest quality properties?
+
+```{r warning=FALSE}
+highQualityCodes <- c("A","B")
+highQualityProperties <- house.data.new %>% filter(as.character(QualityGradeCode) %in% highQualityCodes)
+ggplot(highQualityProperties, aes(x=QualityGradeCode.new, fill = CityCode)) +
+    geom_histogram(bins = 10, binwidth = 1, stat = "count") +
+    labs(x = "Quality",
+       title = "Property Grade Distribution")
+```
+
+Total Market Value by YearBuilt (Filtered up to TMV < 1e6)
+
+```{r, fig.width=10}
+ggplot(house.data.new, aes(x=YearBuilt.new, y=TotalMarketValue)) +
+    geom_point(color = "red") +
+    labs(x = "YearBuilt",
+       title = "Total Market Value by Year")
+```
+
+### Anova (Analysis of Variance):
+Do housing market values vary based on year built?
+
+```{r}
+# One way anova test http://www.sthda.com/english/wiki/one-way-anova-test-in-r
+marketValueByDecade <- data.frame(TotalMarketValue = house.data.new$TotalMarketValue, Decade = as.factor(floor(as.numeric(format(house.data.new$YearBuilt.new, '%Y')) / 10) * 10)) # Floor to decade
+
+anova <- aov(TotalMarketValue ~ Decade, data=marketValueByDecade)
+summary(anova)
+```
+
+```{r, fig.width=10}
+plot(anova, 1)
+```
+
+```{r warning=FALSE}
+# Levene test to validate our assumptions of p-value http://www.sthda.com/english/wiki/one-way-anova-test-in-r
+leveneTest(TotalMarketValue ~ Decade, data = marketValueByDecade)
+```
+
+Two part test between all bins of decades for significance p values:
+
+```{r}
+TukeyHSD(anova)
+```
+
+There seems to be a significant variance in price detected between the decade the home was built in and the TotalMarketValue
+
+We can see that the lower quartile range in the 2010s is close to the top quartile market valued assessed properties in the 1960s, which means there are a denser amount of properties valued in the upper 200,000-400,000 USD range for Stanly County now.
+
+It seems that the newer built homes have a significant difference in TotalMarketValue compared to the previous decades (Specifically homes built after 2000)
+
+```{r, fig.width=10}
+ggplot(marketValueByDecade, aes(x=Decade, y=TotalMarketValue)) + 
+  geom_boxplot(outlier.colour="red",
+                outlier.size=2)
+```
+
+### Correlations between TotalMarketValue
+
+We can see that the biggest predictors of TotalMarketValue are the land value and square footage of the dwelling(s) total.
+
+We can see that Baths and HVAC Units have a pretty strong correlation with TotalMarketValue (~0.60).
+
+We can also see that Baths and HVAC units in general have a strong correlation which would be expected since home owners with larger/bigger HVAC systems would have to support more bathrooms.
+
+No other features were found that had strong correlations in general.
+
+We can also see certain features provide less return on market value compared to Taxable value which is a negative trait. You would want to have the most market value from upgrading these features compared to your taxable amount they contribute on your property assessment.
+
+Features which have a low return compared to their taxable correlation:
+- Baths (0.07 difference)
+- Beds (0.05 difference)
+- HVACUnits (0.05 difference)
+
+```{r, fig.width=12}
+numericVars <- which(sapply(house.data.new, is.numeric))
+numericVarNames <- names(numericVars)
+all_numVar <- house.data.new[, numericVars]
+cor_numVar <- cor(all_numVar, use="pairwise.complete.obs") #correlations of all numeric variables
+
+#sort on decreasing correlations with TotalMarketValue
+cor_sorted <- as.matrix(sort(cor_numVar[,'TotalMarketValue'], decreasing = TRUE))
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.3))) # Abs threshold of correlation we want
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+corrplot.mixed(cor_numVar, tl.col="black", tl.pos = "lt")
+
+```
+
+### Analyzing variable importance
+
+From initial quick random forest we can see important features:
+- LandMarketValue
+- ListedAcres/ActualAcres
+- DistrictCode
+- TownshipCode
+- QualityGradeCode
+- Sqft
+- HVACUnits
+
+We can see that the land/acres associated with a property has an enormous value on the TotalMarketValue assessment of the property itself
+
+```{r, fig.width=10}
+# Filter exceedingly large factors > 53 categories for a quick RandomForest for variable importance
+# Certain features we will use to locate the actual Long/Lat of the property from the actual address
+house.data.rfdata <- house.data.new %>% dplyr::select(-Block, -OwnerID, -PrimaryOwner, -TaxPayerCity, -Zip, -PhyStreetName, -MarketAreaCode)
+
+set.seed(2018)
+# Ignore TMV (prediction) and DateSold (NAs, irrelevant)
+quick_RF <- randomForest(x=house.data.rfdata[1:5000, c(-5, -6, -14, -16, -19)], y=house.data.rfdata$TotalMarketValue[1:5000], ntree=100, importance=TRUE)
+imp_RF <- importance(quick_RF)
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:20,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() + theme(legend.position="none")
+```
+
+### Exploring how districtCode affects median TotalMarketValue
+
+Upon further exploration we can see that these properties identified by DistrictCode 548 contain waterfront properties and most are owned by a developer corporation known as EDGEWATER DEVELOPERS INC
+
+Other high-value properties are owned by individuals which are located on Lake Tillery via the town of Norwood.
+
+Other higher than median districts include:
+- 550
+- 116
+
+```{r, fig.width=8}
+ggplot(house.data.rfdata[!is.na(house.data.rfdata$TotalMarketValue),], aes(x=DistrictCode, y=TotalMarketValue)) + geom_bar(stat='summary', fun.y = "median", fill='blue') +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_y_continuous(breaks= seq(0, 800000, by=50000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) +
+        geom_hline(yintercept=median(house.data.rfdata$TotalMarketValue), linetype="dashed", color = "red")
+```
+
+By far the lowest valued district is 520 in which the median market value is $46,876
+
+Upon further exploration it seems that 520 distict is located in the city of Badin near the previous area of the Alcoa Plant as well as employer Electronic Recyclers.
+
+In previous years many homes were built for long standing employees working under factories throughout the U.S. which resulted in many homes being grouped together with the same architecture style and upkeep. However, if the resulting employer goes under these homes are worth a lot less than their previous values.
+
+```{r}
+median(house.data.new[house.data.new$DistrictCode == "520", "TotalMarketValue"])
+```
+
+We can also see that the following properties are waterfront based on the addresses listed in this district.
+
+District 548 contains high valued properties via Lake Tillery managed under a real estate company known as Edgewater. This makes our dataset highly skewed with these properties. From this point on we will remove these properties from our dataset to be more representative of our actual data.
+
+```{r}
+median(house.data.new[house.data.new$DistrictCode == "548", "TotalMarketValue"])
+```
+
+```{r}
+# Remove outliers
+house.data.new <- house.data.new %>% filter(DistrictCode != 548)
+
+# Rexamined Medians post-filter
+ggplot(house.data.new[!is.na(house.data.new$TotalMarketValue),], aes(x=DistrictCode, y=TotalMarketValue)) + geom_bar(stat='summary', fun.y = "median", fill='blue') +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_y_continuous(breaks= seq(0, 800000, by=50000), labels = comma) +
+        geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) +
+        geom_hline(yintercept=median(house.data.new$TotalMarketValue), linetype="dashed", color = "red")
+```
+
+### Exploring "Value" Properties
+
+What are homes with the highest quality codes and critical features with the lowest price? Aka Best valued homes assessed via the County.
+
+Our formula seeks to gain the most features for the lowest market value possible aka the "deals" of the assessed properties
+
+The sum of each column vector for the specified features $X_{ij}$ scaled as a portion of the TotalMarketValue $V$
+
+$\frac{(\sum_{j=1}^n Scale(X_{ij})}{Scale(V)} $
+
+```{r}
+qualityProperties <- house.data.new %>%
+   filter(QualityGradeCode.new == "A" | QualityGradeCode.new == "B" | QualityGradeCode.new == "C")
+
+qualityProperties["QualityGradeCode.new.numeric"] <- as.numeric(factor(qualityProperties$QualityGradeCode.new, levels = c("A","B","C","D","E"), labels = c(4, 3, 2, 1, 0)))
+
+qualityProperties <- qualityProperties %>%
+  mutate_at(c(2, 14, 29, 30, 31, 38, 21), funs(c(scale(.))))
+
+qualityProperties["TotalPropertyScore"] <- qualityProperties$Sqft + qualityProperties$ActualAcres +
+     qualityProperties$QualityGradeCode.new.numeric +
+     qualityProperties$Bedrooms +
+     qualityProperties$Baths +
+     qualityProperties$HVACUnits
+
+qualityProperties <- transform(qualityProperties, TotalPropertyValueScore = qualityProperties$TotalPropertyScore / qualityProperties$TotalMarketValue)
+
+qualityProperties$TotalPropertyValueScore <- scale(qualityProperties$TotalPropertyValueScore)
+
+# Top 10 "value" based properties, higher score indicates more features for the market price gained
+head(qualityProperties[order(-qualityProperties$TotalPropertyValueScore ),], 10)
+
+```
+
